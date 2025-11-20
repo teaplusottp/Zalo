@@ -43,8 +43,8 @@ class Config:
         self.end_time = float(end_time) if end_time else None
 
         # PATHS
-        self.data_base = r"C:\BOSCH\Zalo\MobileSAM\Data\public_test\public_test\samples"
-        self.segment_base = r"C:\BOSCH\Zalo\MobileSAM\MobileSAMv2\Data\segment_objects"
+        self.data_base = r"D:\code\detect\public_test\public_test\samples"
+        self.segment_base = r"./segment_objects"
         self.results_base = "results_final_tracking"
 
         self.video_path = os.path.join(self.data_base, video_id, "drone_video.mp4")
@@ -58,7 +58,9 @@ class Config:
 
         # MODEL CONFIG
         # Model gây lỗi lúc nãy, giờ đã có login nên sẽ tải được
-        self.dino_model_id = "facebook/dinov3-vits16-pretrain-lvd1689m" 
+       # self.dino_model_id = "./weight/DINO" 
+        self.dino_model_id = "facebook/dinov3-vits16-pretrain-lvd1689m"  
+       
         self.sam_checkpoint = './weight/mobile_sam.pt'
         self.yolo_model = './weight/ObjectAwareModel.pt'
 
@@ -142,6 +144,7 @@ class SimilarityModel:
     def load_templates(self, img_dir, mask_dir):
         feats = []
         print("📝 Processing templates...")
+        print(cfg.yolo_model)
         for i in range(1, 4):
             img_path = os.path.join(img_dir, f"img_{i}.jpg")
             mask_path = os.path.join(mask_dir, f"img_{i}.png")
@@ -310,9 +313,9 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.3):
 
 
 # ====================== MAIN PIPELINE ======================
-def main():
+def main(object):
     start_time_real = datetime.now()
-    cfg = Config("LifeJacket_0", start_time=40, end_time=50) # Chỉnh lại start_time nếu cần
+    cfg = Config(object, start_time=40, end_time=50) # Chỉnh lại start_time nếu cần
     
     if not all(os.path.exists(p) for p in [cfg.video_path, cfg.template_img_dir, cfg.template_mask_dir]):
         print("❌ Missing data!"); return
@@ -483,4 +486,4 @@ def main():
     print(f"\n✅ Done! Results saved to:\n - {cfg.output_video}\n - {cfg.output_json}")
 
 if __name__ == "__main__":
-    main()
+    main("LifeJacket_0")
