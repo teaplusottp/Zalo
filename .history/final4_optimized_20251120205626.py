@@ -42,14 +42,13 @@ class Config:
         self.start_time = float(start_time)
         self.end_time = float(end_time) if end_time else None
 
-        # PATHS
+        # PATHS - Load từ samples/video_id/object_images
         self.data_base = r"D:\code\detect\public_test\public_test\samples"
-        self.segment_base = r"./segment_objects"
         self.results_base = "results_final_tracking"
 
         self.video_path = os.path.join(self.data_base, video_id, "drone_video.mp4")
-        self.template_img_dir = os.path.join(self.segment_base, video_id, "original_images")
-        self.template_mask_dir = os.path.join(self.segment_base, video_id, "mask_images")
+        # Template images từ object_images trong samples
+        self.template_img_dir = os.path.join(self.data_base, video_id, "object_images")
 
         os.makedirs(os.path.join(self.results_base, video_id), exist_ok=True)
         suffix = f"_t{int(self.start_time)}" + (f"-{int(self.end_time)}" if self.end_time else "")
@@ -57,10 +56,7 @@ class Config:
         self.output_json = self.output_video.replace('.mp4', '.json')
 
         # MODEL CONFIG
-        # Model gây lỗi lúc nãy, giờ đã có login nên sẽ tải được
         self.dino_model_id = "./weight/DINO" 
-        #self.dino_model_id = "facebook/dinov3-vits16-pretrain-lvd1689m"  
-       
         self.sam_checkpoint = './weight/mobile_sam.pt'
         self.yolo_model = './weight/ObjectAwareModel.pt'
 
@@ -134,29 +130,130 @@ class FFAProcessor:
         return sum_feat / sum_mask
 
 
+# ====================== AUTO SEGMENTATION (từ seg_object.py) ======================
+def segment_background_then_object(image_bgr, mobilesamv2, device):
+    """
+    Segment nền trước, sau đó lấy inverse để tìm object lớn nhất.
+    Returns: mask của object (binary)
+    """
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    h, w = image_rgb.shape[:2]
+    
+    predictor = SamPredictor(mobilesamv2)
+    predictor.set_image(image_rgb)
+    
+    # === SEGMENT NỀN: Dùng 4 góc ảnh làm background prompts ===
+    margin = 50  # pixels từ mép
+    background_points = np.array([
+        [margin, margin],              # Góc trên-trái
+        [w - margin, margin],          # Góc trên-phải
+        [margin, h - margin],          # Góc dưới-trái
+        [w - margin, h - margin]       # Góc dưới-phải
+    ])
+    background_labels = np.array([1, 1, 1, 1])  # Tất cả là foreground (nền)
+    
+    # Segment nền
+    masks, scores, _ = predictor.predict(
+        point_coords=background_points,
+        point_labels=background_labels,
+        multimask_output=False
+    )
+    
+    background_mask = masks[0]
+    
+    # === INVERSE MASK: Lấy foreground (objects) ===
+    foreground_mask = ~background_mask
+    
+    # === TÌM CONNECTED COMPONENTS ===
+    foreground_uint8 = foreground_mask.astype(np.uint8) * 255
+    
+    # Tìm các connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        foreground_uint8, connectivity=8
+    )
+    
+    if num_labels <= 1:  # Chỉ có background (label 0)
+        print("[WARN] No foreground objects found")
+        return None
+    
+    # === CHỌN COMPONENT LỚN NHẤT (bỏ qua label 0 = background) ===
+    areas = stats[1:, cv2.CC_STAT_AREA]  # Bỏ label 0
+    largest_component_idx = np.argmax(areas) + 1  # +1 vì đã bỏ label 0
+    
+    # Tạo mask cho object lớn nhất
+    object_mask = (labels == largest_component_idx)
+    
+    return object_mask
+
+
 # ====================== SIMILARITY MODEL ======================
 class SimilarityModel:
-    def __init__(self, cfg):
+    def __init__(self, cfg, mobilesamv2=None):
         self.device = cfg.device
         self.extractor = DinoV3FeatureExtractor(cfg.dino_model_id, self.device)
         self.template_features = None
+        self.mobilesamv2 = mobilesamv2  # SAM model để segment template images
 
-    def load_templates(self, img_dir, mask_dir):
+    def load_templates(self, img_dir):
+        """
+        Load templates từ object_images folder.
+        Tự động segment mỗi ảnh để tạo mask, rồi extract features.
+        
+        Args:
+            img_dir: Path đến folder chứa ảnh (e.g., D:/samples/video_id/object_images)
+        """
         feats = []
-        print("📝 Processing templates...")
-        for i in range(1, 4):
-            img_path = os.path.join(img_dir, f"img_{i}.jpg")
-            mask_path = os.path.join(mask_dir, f"img_{i}.png")
-            if not (os.path.exists(img_path) and os.path.exists(mask_path)): continue
-            img = Image.open(img_path).convert('RGB')
-            mask = np.array(Image.open(mask_path).convert('L')) > 128
-            feat = self.extract_features(img, mask.astype(np.float32))
-            feats.append(feat)
-            print(f"  ✓ Template {i} encoded.")
+        print("📝 Processing templates từ object_images...")
+        
+        # Tìm tất cả ảnh jpg/jpeg trong folder
+        jpg_files = sorted([f for f in os.listdir(img_dir) 
+                           if f.lower().endswith(('.jpg', '.jpeg'))])
+        
+        if not jpg_files:
+            print(f"❌ Không tìm thấy ảnh trong {img_dir}")
+            return False
+        
+        # Xử lý từng ảnh
+        for idx, img_file in enumerate(jpg_files[:3], 1):  # Lấy tối đa 3 ảnh
+            img_path = os.path.join(img_dir, img_file)
+            print(f"  Processing template {idx}: {img_file}")
             
-        if not feats: raise RuntimeError("No template loaded!")
+            try:
+                # Đọc ảnh
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is None:
+                    print(f"    ⚠️ Không thể đọc ảnh: {img_file}")
+                    continue
+                
+                # === AUTO SEGMENT ===
+                if self.mobilesamv2 is not None:
+                    object_mask = segment_background_then_object(img_bgr, self.mobilesamv2, self.device)
+                    if object_mask is None:
+                        print(f"    ⚠️ Segment thất bại cho {img_file}")
+                        continue
+                else:
+                    print(f"    ⚠️ SAM model chưa load, bỏ qua segment")
+                    return False
+                
+                # === EXTRACT FEATURES ===
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img_pil = Image.fromarray(img_rgb)
+                feat = self.extract_features(img_pil, object_mask.astype(np.float32))
+                feats.append(feat)
+                print(f"    ✓ Template {idx} encoded thành công")
+                
+            except Exception as e:
+                print(f"    ❌ Lỗi xử lý {img_file}: {e}")
+                continue
+            
+        if not feats:
+            print("❌ Không thể load bất kỳ template nào!")
+            return False
+            
         self.template_features = torch.stack(feats).to(self.device)
         self.template_features = F.normalize(self.template_features, p=2, dim=1)
+        print(f"✅ Load thành công {len(feats)} template features")
+        return True
 
     def extract_features(self, img_pil, mask_np):
         m = torch.from_numpy(mask_np).float().unsqueeze(0).unsqueeze(0).to(self.device)
@@ -176,7 +273,7 @@ class SimilarityModel:
     def size_penalty(bbox, area):
         w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         ratio = (w * h) / area
-        if ratio < 0.0001: s = 0.8
+        if ratio < 0.0005: s = 0.9
         elif ratio <= 0.001: s = 1.0
         elif ratio <= 0.01: s = 0.9
         elif ratio <= 0.05: s = 0.8
@@ -321,10 +418,8 @@ def main(object):
 
     # --- Load Models ---
     print("📂 Loading models...")
-    sim_model = SimilarityModel(cfg)
-    sim_model.load_templates(cfg.template_img_dir, cfg.template_mask_dir)
-
-    yolo = ObjectAwareModel(cfg.yolo_model)
+    
+    # 1. Load SAM trước (cần cho segmentation templates)
     sam = Sam(image_encoder=TinyViT(img_size=1024, in_chans=3, num_classes=1000,
                                     embed_dims=[64,128,160,320], depths=[2,2,6,2],
                                     num_heads=[2,4,5,10], window_sizes=[7,7,14,7]),
@@ -336,6 +431,13 @@ def main(object):
     sam.load_state_dict(torch.load(cfg.sam_checkpoint, map_location=cfg.device), strict=False)
     sam.to(cfg.device).eval()
     predictor = SamPredictor(sam)
+    
+    # 2. Load SimilarityModel (với SAM model để segment templates)
+    sim_model = SimilarityModel(cfg, mobilesamv2=sam)
+    sim_model.load_templates(cfg.template_img_dir)
+
+    # 3. Load YOLO
+    yolo = ObjectAwareModel(cfg.yolo_model)
 
     # --- Video Setup ---
     cap = cv2.VideoCapture(cfg.video_path)
