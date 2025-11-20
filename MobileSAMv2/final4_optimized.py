@@ -20,9 +20,9 @@ from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
 # ✅ THÊM ĐOẠN NÀY ĐỂ LOGIN HUGGING FACE
-from huggingface_hub import login
-# Token của bạn
-login(token="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")
+# from huggingface_hub import login
+# # Token của bạn
+# login(token="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")
 
 # Transformers for DINOv3
 from transformers import AutoImageProcessor, AutoModel
@@ -58,8 +58,8 @@ class Config:
 
         # MODEL CONFIG
         # Model gây lỗi lúc nãy, giờ đã có login nên sẽ tải được
-       # self.dino_model_id = "./weight/DINO" 
-        self.dino_model_id = "facebook/dinov3-vits16-pretrain-lvd1689m"  
+        self.dino_model_id = "./weight/DINO" 
+        #self.dino_model_id = "facebook/dinov3-vits16-pretrain-lvd1689m"  
        
         self.sam_checkpoint = './weight/mobile_sam.pt'
         self.yolo_model = './weight/ObjectAwareModel.pt'
@@ -144,7 +144,6 @@ class SimilarityModel:
     def load_templates(self, img_dir, mask_dir):
         feats = []
         print("📝 Processing templates...")
-        print(cfg.yolo_model)
         for i in range(1, 4):
             img_path = os.path.join(img_dir, f"img_{i}.jpg")
             mask_path = os.path.join(mask_dir, f"img_{i}.png")
